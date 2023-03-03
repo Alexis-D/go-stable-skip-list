@@ -28,8 +28,11 @@ jobs:
     - name: Style
       run: |
         echo "::group::Ensuring everything is tidy"
+        git status
         go mod tidy
+        git status
         go fmt ./...
+        git status
         echo "::endgroup::"
 
         GIT_STATUS="$(git status --porcelain)"
