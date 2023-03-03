@@ -1,8 +1,8 @@
 # `go-stable-skip-list`
 
-This is a toy[^1] [skip list (wikipedia](https://en.wikipedia.org/wiki/Skip_list) implementation. The main difference
+This is a toy[^1] [skip list (wikipedia)](https://en.wikipedia.org/wiki/Skip_list) implementation. The main difference
 compared to various skip lists implementations out there is that it is 'stable', as in, it not only allows for
-duplicates but it also retain them in the order they were inserted. As such `Insert(value T)` does always perform an
+duplicates but it also retains them in the order they were inserted. As such `Insert(value T)` does always perform an
 insert and never updates a value.
 
 Quick example of how this is used:
