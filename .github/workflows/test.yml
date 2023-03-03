@@ -28,19 +28,15 @@ jobs:
     - name: Style
       run: |
         echo "::group::Ensuring everything is tidy"
-        git status
         go mod tidy
-        git status
         go fmt ./...
-        git status
         echo "::endgroup::"
 
-        GIT_STATUS="$(git status --porcelain)"
-
-        if [[ -z "$GIT_STATUS" ]]
+        if [[ ! -z "$(git status --porcelain)" ]]
         then
           echo '⚠️ Need to rerun `go mod tidy` and/or `go fmt`' >> $GITHUB_STEP_SUMMARY
-          echo "$GIT_STATUS"
           exit 1
         fi
+
+        echo '✅ All good!' >> $GITHUB_STEP_SUMMARY
 
