@@ -32,9 +32,12 @@ jobs:
         go fmt ./...
         echo "::endgroup::"
 
-        if [[ -z "$(git status --porcelain)" ]]
+        GIT_STATUS="$(git status --porcelain)"
+
+        if [[ -z "$GIT_STATUS" ]]
         then
-          echo 'Need to rerun go mod tidy and/or go fmt' >> $GITHUB_STEP_SUMMARY
+          echo '⚠️ Need to rerun `go mod tidy` and/or `go fmt`' >> $GITHUB_STEP_SUMMARY
+          echo "$GIT_STATUS"
           exit 1
         fi
 
