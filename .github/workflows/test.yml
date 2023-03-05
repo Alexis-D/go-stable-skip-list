@@ -16,7 +16,13 @@ jobs:
     - name: Tests
       run: go test -coverprofile cover.out -v ./...
     - name: Coverage
-      run: go tool cover -func=cover.out
+      run: |
+        out=$(go tool cover -func=cover.out)
+        echo "$out"
+        echo "```" >> $GITHUB_STEP_SUMMARY
+        <<<$out grep -e FindFirst -e DeleteFirst
+        echo "```" >> $GITHUB_STEP_SUMMARY
+
   lint:
     runs-on: ubuntu-latest
     steps:
