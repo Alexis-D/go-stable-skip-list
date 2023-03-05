@@ -19,9 +19,9 @@ jobs:
       run: |
         out=$(go tool cover -func=cover.out)
         echo "$out"
-        echo "```" >> $GITHUB_STEP_SUMMARY
-        <<<$out grep -e FindFirst -e DeleteFirst
-        echo "```" >> $GITHUB_STEP_SUMMARY
+        echo '```' >>$GITHUB_STEP_SUMMARY
+        <<<$out grep -e FindFirst -e DeleteFirst >>$GITHUB_STEP_SUMMARY
+        echo '```' >>$GITHUB_STEP_SUMMARY
 
   lint:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
 
         if [[ ! -z "$(git status --porcelain)" ]]
         then
-          echo '⚠️ Need to rerun `go mod tidy` and/or `go fmt`' >> $GITHUB_STEP_SUMMARY
+          echo '⚠️ Need to rerun `go mod tidy` and/or `go fmt`' >>$GITHUB_STEP_SUMMARY
           exit 1
         fi
 
