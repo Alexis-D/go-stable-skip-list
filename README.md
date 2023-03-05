@@ -51,5 +51,31 @@ It will output the list:
 (0): -> {insertedAt:13 value:1} -> {insertedAt:6 value:8} -> {insertedAt:5 value:9} -> {insertedAt:4 value:10} -> {insertedAt:7 value:11} -> {insertedAt:3 value:12} -> {insertedAt:1 value:13} -> {insertedAt:2 value:17} -> {insertedAt:8 value:18} -> {insertedAt:9 value:19} -> {insertedAt:10 value:21} -> {insertedAt:12 value:22} -> {insertedAt:11 value:23} -> nil
 ```
 
+How does the algo differ from a textbook skip list? It ensures it builds a 'wall' when duplicates are encountered, such
+that the first inserted 'dupe' is always the first one to be hit, probably easier to visualize (nodes being represented
+as value (insertion timestamp)):
+
+```
+-------------------------------------> 5 (4) -> nil
+-> 1 (0) ----------> 3 (2) ----------> 5 (4) -> nil
+-> 1 (0) -> 2 (1) -> 3 (2) -> 3 (3) -> 5 (4) -> nil
+```
+
+Now inserting `3 (5)` results in (note how we grew `3 (2)` instead of `3 (5)`):
+
+```
+-------------------> 3 (2) -------------------> 5 (4) -> nil
+-> 1 (0) ----------> 3 (2) ----------> 3 (5) -> 5 (4) -> nil
+-> 1 (0) -> 2 (1) -> 3 (2) -> 3 (3) -> 3 (5) -> 5 (4) -> nil
+```
+
+Deletion works the same way, e.g. if we remove `3`, we now get:
+
+```
+-------------------------------------> 5 (4) -> nil
+-> 1 (0) ----------> 3 (3) -> 3 (5) -> 5 (4) -> nil
+-> 1 (0) -> 2 (1) -> 3 (3) -> 3 (5) -> 5 (4) -> nil
+```
+
 
 [^1]: it's not threadsafe, it has very little tests, it's not very configurable, etc

@@ -3,6 +3,8 @@ package pkg
 import (
 	"fmt"
 	"golang.org/x/exp/rand"
+	"math/bits"
+	"strings"
 )
 
 // Cmp must -1 when a < b, 0 when a == b, 1 when a > b
@@ -16,6 +18,7 @@ type StableSkipList[T any] interface {
 	Insert(value T)
 	// FindFirst's bool indicates whether the value was actually found
 	FindFirst(value T) (T, bool)
+	// FindFirstGreaterEq(value T) (T, bool)
 	DeleteFirst(value T)
 	// First's bool indicates whether the value was actually found
 	First() (T, bool)
@@ -24,10 +27,12 @@ type StableSkipList[T any] interface {
 	fmt.Stringer
 }
 
+type randUint32Fn func() uint32
+
 type stableSkipList[T any] struct {
-	forward []*stableSkipListNode[T]
-	rand    *rand.Rand
-	cmp     Cmp[T]
+	heads      []*stableSkipListNode[T]
+	randUint32 randUint32Fn
+	cmp        Cmp[T]
 }
 
 type stableSkipListNode[T any] struct {
@@ -35,82 +40,165 @@ type stableSkipListNode[T any] struct {
 	forward []*stableSkipListNode[T]
 }
 
+func (ssl *stableSkipList[T]) insertHead(level int, newNode *stableSkipListNode[T]) {
+	newNode.forward[level] = ssl.heads[level]
+	ssl.heads[level] = newNode
+}
+
+func (ssln *stableSkipListNode[T]) insertAfter(level int, newNode *stableSkipListNode[T]) {
+	newNode.forward[level] = ssln.forward[level]
+	ssln.forward[level] = newNode
+}
+
 func New[T any](cmp Cmp[T]) StableSkipList[T] {
+	r := rand.New(rand.NewSource(0))
 	return &stableSkipList[T]{
-		forward: []*stableSkipListNode[T]{},
-		rand:    rand.New(rand.NewSource(0)),
-		cmp:     cmp,
+		heads: []*stableSkipListNode[T]{},
+		randUint32: func() uint32 {
+			return r.Uint32()
+		},
+		cmp: cmp,
 	}
 }
 
+// Insert inserts the value in the list.
+//
+// see figure 3 in the original paper: https://www.cl.cam.ac.uk/teaching/2006/AlgorithI/skiplists.pdf
+// Skip Lists: A Probabilistic Alternative to Balanced Trees (W. Pugh)
+//
+// This implementation differs from the paper as it needs to account for duplicates, to do that it needs to follow
+// a couple rules:
+// * at level i, the first node with value v _is guaranteed_ to be the first v value inserted into the list
+// * when inserting v, it will be inserted to the right of all equal nodes at that level
 func (ssl *stableSkipList[T]) Insert(value T) {
-	traversedNodesByLevel := make([]*stableSkipListNode[T], len(ssl.forward), len(ssl.forward))
-	var smallerOrEqualNode *stableSkipListNode[T]
-
-	// we starts at the highest layer and try to make our way towards the insertion point
-	// when we can't go any further to the right, we go down to the next layer
-	// see figure 3 in the original paper: https://www.cl.cam.ac.uk/teaching/2006/AlgorithI/skiplists.pdf
-	// Skip Lists: A Probabilistic Alternative to Balanced Trees (W. Pugh)
-	//
-	// the FindFirst/DeleteFirst logic follows roughly the same logic, main difference is that Insert
-	// aims to go to the right of duplicates, while the other two methods aim to the left
-	for level := len(ssl.forward) - 1; level >= 0; level-- {
-		if smallerOrEqualNode == nil {
-			if ssl.cmp(ssl.forward[level].value, value) == 1 {
-				continue
-			}
-
-			smallerOrEqualNode = ssl.forward[level]
-		}
-
-		for smallerOrEqualNode.forward[level] != nil && ssl.cmp(smallerOrEqualNode.forward[level].value, value) <= 0 {
-			smallerOrEqualNode = smallerOrEqualNode.forward[level]
-		}
-
-		traversedNodesByLevel[level] = smallerOrEqualNode
-	}
-
 	nodeToInsert := &stableSkipListNode[T]{
 		value: value,
 	}
+	newHeight := ssl.newHeight()
+	existing := ssl.findFirstNode(value)
 
-	attemptToGrow := true
-	for level := 0; level < len(ssl.forward); level++ {
-		// we always need to insert the node if we are on the bottom layer, otherwise we randomly attempt to grow
-		// iff we've grown at the previous levels
-		if level == 0 || (attemptToGrow && ssl.rand.Intn(2) == 0) {
-			if traversedNodesByLevel[level] != nil {
-				nodeToInsert.forward = append(nodeToInsert.forward, traversedNodesByLevel[level].forward[level])
-				traversedNodesByLevel[level].forward[level] = nodeToInsert
-			} else {
-				nodeToInsert.forward = append(nodeToInsert.forward, ssl.forward[level])
-				ssl.forward[level] = nodeToInsert
-			}
+	if existing != nil && newHeight > len(existing.forward) {
+		// we will need to grow the _existing_ node
+		// the new node will use the height of the existing node to avoid growing the list unnecessarily
+		nodeToInsert.forward = make([]*stableSkipListNode[T], len(existing.forward), len(existing.forward))
+		existing.forward = append(existing.forward, make(
+			[]*stableSkipListNode[T],
+			newHeight-len(existing.forward),
+			newHeight-len(existing.forward),
+		)...)
+	} else {
+		nodeToInsert.forward = make([]*stableSkipListNode[T], newHeight, newHeight)
+	}
 
+	originalHeadHeight := len(ssl.heads)
+	if newHeight > originalHeadHeight {
+		// we need to grow the whole list
+		if existing != nil {
+			ssl.heads = append(ssl.heads, existing)
 		} else {
-			attemptToGrow = false
-			// we can't grow anymore there's no need to keep looping
-			break
+			ssl.heads = append(ssl.heads, nodeToInsert)
 		}
 	}
 
-	// handle the case where the list is empty and/or we want to grow to a whole new level
-	if len(ssl.forward) == 0 || (attemptToGrow && ssl.rand.Intn(2) == 0) {
-		nodeToInsert.forward = append(nodeToInsert.forward, nil)
-		ssl.forward = append(ssl.forward, nodeToInsert)
+	// largestSmaller is the node that will come _right before_ a node with the value we're looking for on a given level
+	// largestEq if the last node on a level to come with the value we're looking for
+	var largestSmaller, largestEq *stableSkipListNode[T]
+	for level := originalHeadHeight - 1; level >= 0; level-- {
+		if largestSmaller == nil || largestEq == nil {
+			switch ssl.cmp(ssl.heads[level].value, value) {
+			case -1: // head is smaller than our target
+				if largestSmaller == nil {
+					largestSmaller = ssl.heads[level]
+				}
+			case 0: // head is equal to our target
+				if largestEq == nil {
+					largestEq = ssl.heads[level]
+				}
+			case 1: // head is larger than our target
+				if level < len(nodeToInsert.forward) {
+					// we make the list head point to our new node, and our new node to the old head
+					ssl.insertHead(level, nodeToInsert)
+				}
+
+				if existing != nil {
+					if level < len(existing.forward) {
+						// we insertAfter our existing node at the list' head, and point the existing node to the old head
+						ssl.insertHead(level, existing)
+					}
+				}
+
+				continue
+			}
+		}
+
+		for largestSmaller != nil && largestSmaller.forward[level] != nil && ssl.cmp(largestSmaller.forward[level].value, value) == -1 {
+			largestSmaller = largestSmaller.forward[level]
+		}
+
+		if largestEq == nil && largestSmaller.forward[level] != nil && ssl.cmp(largestSmaller.forward[level].value, value) == 0 {
+			largestEq = largestSmaller.forward[level]
+		}
+
+		for largestEq != nil && largestEq.forward[level] != nil && ssl.cmp(largestEq.forward[level].value, value) == 0 {
+			largestEq = largestEq.forward[level]
+		}
+
+		if largestSmaller != nil {
+			if existing != nil {
+				if largestSmaller.forward[level] != existing && level < len(existing.forward) {
+					// we need to grow our existing node
+					largestSmaller.insertAfter(level, existing)
+				}
+			}
+		}
+
+		if largestEq != nil {
+			if level < len(nodeToInsert.forward) {
+				// we insertAfter to the right
+				largestEq.insertAfter(level, nodeToInsert)
+			}
+		}
+
+		if largestSmaller != nil && largestEq == nil {
+			if level < len(nodeToInsert.forward) {
+				// we're inserting a new non-dupe value into the tree
+				largestSmaller.insertAfter(level, nodeToInsert)
+			}
+		}
 	}
 }
 
+// newHeight returns an integer in the range [1, min(33, len(ssl.heads)+1)]
+func (ssl *stableSkipList[T]) newHeight() int {
+	height := bits.TrailingZeros32(ssl.randUint32())
+
+	if height == 0 {
+		return 1
+	} else if height <= len(ssl.heads) {
+		return height
+	}
+
+	return len(ssl.heads) + 1
+}
+
 func (ssl *stableSkipList[T]) FindFirst(value T) (T, bool) {
+	maybeNode := ssl.findFirstNode(value)
+	if maybeNode != nil {
+		return maybeNode.value, true
+	}
+	return *new(T), false
+}
+
+func (ssl *stableSkipList[T]) findFirstNode(value T) *stableSkipListNode[T] {
 	var smallerNode *stableSkipListNode[T]
 
-	for level := len(ssl.forward) - 1; level >= 0; level-- {
+	for level := len(ssl.heads) - 1; level >= 0; level-- {
 		if smallerNode == nil {
-			switch ssl.cmp(ssl.forward[level].value, value) {
+			switch ssl.cmp(ssl.heads[level].value, value) {
 			case -1:
-				smallerNode = ssl.forward[level]
+				smallerNode = ssl.heads[level]
 			case 0:
-				return ssl.forward[level].value, true
+				return ssl.heads[level]
 			case 1:
 				continue
 			default:
@@ -124,7 +212,7 @@ func (ssl *stableSkipList[T]) FindFirst(value T) (T, bool) {
 			case -1:
 				smallerNode = smallerNode.forward[level]
 			case 0:
-				return smallerNode.forward[level].value, true
+				return smallerNode.forward[level]
 			case 1:
 				break loop
 			default:
@@ -133,86 +221,103 @@ func (ssl *stableSkipList[T]) FindFirst(value T) (T, bool) {
 		}
 	}
 
-	return *new(T), false
+	return nil
 }
 
 func (ssl *stableSkipList[T]) DeleteFirst(value T) {
-	traversedNodesByLevel := make([]*stableSkipListNode[T], len(ssl.forward), len(ssl.forward))
 	var smallerNode *stableSkipListNode[T]
-
-	for level := len(ssl.forward) - 1; level >= 0; level-- {
+	for level := len(ssl.heads) - 1; level >= 0; level-- {
 		if smallerNode == nil {
-			if ssl.cmp(ssl.forward[level].value, value) >= 0 {
+			switch ssl.cmp(ssl.heads[level].value, value) {
+			case -1:
+				smallerNode = ssl.heads[level]
+			case 0: // we found a head to delete
+				nodeToDelete := ssl.heads[level]
+				if nodeToDelete.forward[level] != nil && ssl.cmp(nodeToDelete.forward[level].value, value) == 0 {
+					// we have a dupe on this level
+					nextLogicalDupe := nodeToDelete.forward[0]
+					if nodeToDelete.forward[level] != nextLogicalDupe && len(nodeToDelete.forward) > len(nextLogicalDupe.forward) {
+						// and the dupe was not the next logical dupe (we know that from looking at the bottom layer)
+						// we make the next logic dupe copy the tree of the node we are deleting
+						nextLogicalDupe.forward = append(
+							nextLogicalDupe.forward,
+							nodeToDelete.forward[len(nextLogicalDupe.forward):len(nodeToDelete.forward)]...)
+					}
+
+					// point the head to the next logical dupe
+					ssl.heads[level] = nextLogicalDupe
+				} else {
+					// no dupe on this level, we can shrink our node and remove it from this level
+					next := nodeToDelete.forward[level]
+					nodeToDelete.forward = nodeToDelete.forward[:len(nodeToDelete.forward)-1]
+					ssl.heads[level] = next
+
+					// ensure invariant: no heads point to nil
+					if ssl.heads[level] == nil {
+						ssl.heads = ssl.heads[:len(ssl.heads)-1]
+					}
+				}
+			case 1:
 				continue
 			}
-
-			smallerNode = ssl.forward[level]
 		}
 
-		for smallerNode.forward[level] != nil && ssl.cmp(smallerNode.forward[level].value, value) == -1 {
+		for smallerNode != nil && smallerNode.forward[level] != nil && ssl.cmp(smallerNode.forward[level].value, value) == -1 {
 			smallerNode = smallerNode.forward[level]
 		}
 
-		traversedNodesByLevel[level] = smallerNode
-	}
+		if smallerNode != nil && smallerNode.forward[level] != nil && ssl.cmp(smallerNode.forward[level].value, value) == 0 {
+			nodeToDelete := smallerNode.forward[level]
+			if nodeToDelete.forward[level] != nil && ssl.cmp(nodeToDelete.value, nodeToDelete.forward[level].value) == 0 {
+				nextLogicalDupe := nodeToDelete.forward[0]
+				if nodeToDelete.forward[level] != nextLogicalDupe && len(nodeToDelete.forward) > len(nextLogicalDupe.forward) {
+					nextLogicalDupe.forward = append(
+						nextLogicalDupe.forward,
+						nodeToDelete.forward[len(nextLogicalDupe.forward):len(nodeToDelete.forward)]...)
+				}
 
-	for level := 0; level < len(ssl.forward); level++ {
-		if traversedNodesByLevel[level] != nil &&
-			traversedNodesByLevel[level].forward[level] != nil &&
-			ssl.cmp(traversedNodesByLevel[level].forward[level].value, value) == 0 {
-			traversedNodesByLevel[level].forward[level] = traversedNodesByLevel[level].forward[level].forward[level]
-		} else if traversedNodesByLevel[level] == nil && ssl.cmp(ssl.forward[level].value, value) == 0 {
-			if ssl.forward[level].forward[level] == nil {
-				// no more nodes at this level, so we just shrinks the forward pointer slice
-				ssl.forward = ssl.forward[:level]
-				return
+				smallerNode.forward[level] = nextLogicalDupe
 			} else {
-				// we skip over the node to delete
-				ssl.forward[level] = ssl.forward[level].forward[level]
+				next := nodeToDelete.forward[level]
+				nodeToDelete.forward = nodeToDelete.forward[:len(nodeToDelete.forward)-1]
+				smallerNode.forward[level] = next
 			}
 		}
 	}
 }
 
 func (ssl *stableSkipList[T]) First() (T, bool) {
-	if len(ssl.forward) == 0 {
+	if len(ssl.heads) == 0 {
 		return *new(T), false
 	}
 
-	return ssl.forward[0].value, true
+	return ssl.heads[0].value, true
 }
 
 func (ssl *stableSkipList[T]) Last() (T, bool) {
-	if len(ssl.forward) == 0 {
+	if len(ssl.heads) == 0 {
 		return *new(T), false
 	}
 
-	node := ssl.forward[len(ssl.forward)-1]
-
-	for level := len(ssl.forward) - 1; level >= 0; level-- {
+	node := ssl.heads[len(ssl.heads)-1]
+	for level := len(ssl.heads) - 1; level >= 0; level-- {
 		for node.forward[level] != nil {
 			node = node.forward[level]
 		}
 	}
-
 	return node.value, true
 }
 
 func (ssl *stableSkipList[T]) String() string {
-	s := ""
-
-	for level := len(ssl.forward) - 1; level >= 0; level-- {
-		s += fmt.Sprintf("(%d): -> ", level)
-
-		node := ssl.forward[level]
-
+	var sb strings.Builder
+	for level := len(ssl.heads) - 1; level >= 0; level-- {
+		sb.WriteString(fmt.Sprintf("(%d): -> ", level))
+		node := ssl.heads[level]
 		for node != nil {
-			s += fmt.Sprintf("%+v -> ", node.value)
+			sb.WriteString(fmt.Sprintf("%+v -> ", node.value))
 			node = node.forward[level]
 		}
-
-		s += "nil\n"
+		sb.WriteString("nil\n")
 	}
-
-	return s
+	return sb.String()
 }
